@@ -180,3 +180,6 @@ if rule_stats:
     df_rules = pd.DataFrame(rule_stats).sort_values('Net Impact (€)', ascending=False)
     st.dataframe(df_rules.style.format({
         'Net Impact (€)': '€{:,.0f}',
+        'Capture Rate (%)': '{:.2f}%',
+        'Precision (%)': '{:.1f}%'
+    }), use_container_width=True)
