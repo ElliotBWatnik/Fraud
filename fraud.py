@@ -248,29 +248,49 @@ st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
-# --- 8. SECTION 3: DEEP DIVES ---
+# --- 7. SECTION 3: DEEP DIVES (WITH FIXED COLORS) ---
 st.markdown("### 3. Friction Deep-Dive")
 fd1, fd2, fd3 = st.columns(3)
 
 if not curr_fp.empty:
-    # Funnel
+    # 1. Funnel: Blue (Total), Red (Lost), Green (Recovered)
     total_fp = len(curr_fp)
     recovered = int(curr_fp['payment_switch'].sum())
-    fig_f = go.Figure(go.Funnel(y=["Blocked", "Lost", "Recovered"], x=[total_fp, total_fp-recovered, recovered]))
+    fig_f = go.Figure(go.Funnel(
+        y=["Blocked (Good)", "Lost / Churned", "Recovered (Switch)"], 
+        x=[total_fp, total_fp-recovered, recovered],
+        textinfo="value+percent initial",
+        marker={"color": ["#636EFA", "#EF553B", "#00CC96"]} # Fixed: Blue, Red, Green
+    ))
+    fig_f.update_layout(title="Payment Switch Recovery", margin=dict(t=40, b=20, l=0, r=0))
     fd1.plotly_chart(fig_f, use_container_width=True)
     
-    # User Type Donut
-    fp_new = curr_fp[curr_fp['customer_source_type'] == 'New']
-    fp_old = curr_fp[curr_fp['customer_source_type'] == 'Existing']
+    # 2. User Type Donut: Purple (New), Orange (Existing)
+    fp_new, fp_old = curr_fp[curr_fp['customer_source_type'] == 'New'], curr_fp[curr_fp['customer_source_type'] == 'Existing']
     f_new = (fp_new['amount_eur'].sum() * margin_pct) + (len(fp_new[fp_new['payment_switch'] == 0]) * ltv_cost)
     f_old = (fp_old['amount_eur'].sum() * margin_pct) + (len(fp_old[fp_old['payment_switch'] == 0]) * ltv_cost)
-    fig_d = go.Figure(data=[go.Pie(labels=['New', 'Existing'], values=[f_new, f_old], hole=.4)])
+    
+    fig_d = go.Figure(data=[go.Pie(
+        labels=['New Users', 'Existing Users'], 
+        values=[f_new, f_old], 
+        hole=.4,
+        marker_colors=["#AB63FA", "#FFA15A"] # Fixed: Purple & Orange
+    )])
+    fig_d.update_layout(title="Friction Cost (€) by User Type", margin=dict(t=40, b=20, l=0, r=0))
     fd2.plotly_chart(fig_d, use_container_width=True)
     
-    # Action Pie
+    # 3. Action Pie: Cyan (3DS), Pink (Hard Block)
     act_counts = curr_fp['rule_action'].value_counts()
-    fig_p = go.Figure(data=[go.Pie(labels=act_counts.index, values=act_counts.values, hole=.4)])
+    fig_p = go.Figure(data=[go.Pie(
+        labels=['3DS Drop-off' if x=='review' else 'Hard Decline' for x in act_counts.index], 
+        values=act_counts.values, 
+        hole=.4,
+        marker_colors=["#19D3F3", "#FF6692"] # Fixed: Cyan & Pink
+    )])
+    fig_p.update_layout(title="False Positives by Action", margin=dict(t=40, b=20, l=0, r=0))
     fd3.plotly_chart(fig_p, use_container_width=True)
+else:
+    st.info("No False Positives to analyze for this segment.")
 
 st.divider()
 
