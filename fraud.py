@@ -300,7 +300,7 @@ if bench_list:
         df_bench.style.applymap(color_status, subset=['Status']),
         use_container_width=True,
         hide_index=True
-    )st.dataframe(pd.DataFrame(bench_list), use_container_width=True)
+    )
 
 st.subheader("Rule Level Breakdown")
 rule_list = []
