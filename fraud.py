@@ -5,10 +5,10 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Fraud Optimization Engine", layout="wide")
 
-# --- 1. UNIFIED DATA GENERATOR & LOADER (REALISTIC POSITIVE SKEW) ---
+# --- 1. UNIFIED DATA GENERATOR & LOADER (BALANCED SKEW) ---
 @st.cache_data
 def get_or_create_data():
-    np.random.seed(777) # New seed for balanced overlap
+    np.random.seed(777) 
     num_records = 30000
     
     markets = ['FO_NO', 'FO_SE', 'FO_FI', 'FO_DK', 'FO_EE']
@@ -26,13 +26,13 @@ def get_or_create_data():
     base_fraud_prob = 0.04
     is_actual_chargeback = np.random.binomial(1, base_fraud_prob, num_records)
 
-    # THE FIX: Realistic overlap!
+    # Realistic overlap for the Frontier Curve
     risk_score = np.zeros(num_records)
     for i in range(num_records):
         if is_actual_chargeback[i] == 1:
-            risk_score[i] = np.random.normal(70, 20) # Mean 70, but some fraudsters score low
+            risk_score[i] = np.random.normal(70, 20) 
         else:
-            risk_score[i] = np.random.normal(25, 15) # Mean 25, but some good users score high
+            risk_score[i] = np.random.normal(25, 15) 
             
     risk_score = np.where(entity_col == 'FO_EE', risk_score + 8, risk_score)
     risk_score = np.where(entity_col == 'FO_NO', risk_score - 8, risk_score)
@@ -43,7 +43,6 @@ def get_or_create_data():
         mkt = entity_col[i]
         score = risk_score[i]
         
-        # Rules set slightly sub-optimally to show the Red X below the peak
         if mkt == 'FO_NO':
             if score > 45: rule_triggered[i] = 'velocity_high_risk_block'
         elif mkt == 'FO_SE': 
@@ -94,97 +93,12 @@ def get_or_create_data():
     })
     return df
 
-df_raw = get_or_create_data()
-
-# --- 2. SIDEBAR FILTERS ---
-st.sidebar.header("1. Global Filters")
-if st.sidebar.button("🔄 Clear Cache & Regenerate"):
-    st.cache_data.clear()
-    st.rerun()
-
-market = st.sidebar.selectbox("Market Entity", options=['All Markets'] + sorted(list(df_raw['global_entity_id'].unique())))
-month = st.sidebar.selectbox("Month", options=['All Months'] + sorted(list(df_raw['Month'].unique())))
-vertical = st.sidebar.selectbox("Vendor Vertical", options=['All Verticals'] + sorted(list(df_raw['vendor_vertical'].unique())))
-is_saved = st.sidebar.selectbox("Card Status", options=['All Cards', 'Saved Card Only', 'New Card Only'])
-
-st.sidebar.header("2. Economic Assumptions")
-margin_pct = st.sidebar.slider("Net Profit Margin (%)", 1, 30, 10) / 100.0
-cb_fee = st.sidebar.number_input("Chargeback Fee (€)", value=15.0)
-ltv_cost = st.sidebar.number_input("Blended LTV Cost per Churn (€)", value=50.0)
-
-# --- 3. APPLY FILTERS ---
-df = df_raw.copy()
-if market != 'All Markets': df = df[df['global_entity_id'] == market]
-if month != 'All Months': df = df[df['Month'] == month]
-if vertical != 'All Verticals': df = df[df['vendor_vertical'] == vertical]
-if is_saved == 'Saved Card Only': df = df[df['is_saved_card'] == True]
-elif is_saved == 'New Card Only': df = df[df['is_saved_card'] == False]
-
-st.title("🛡️ Fraud Prevention Efficient Frontier")
-
-if df.empty:
-    st.warning("No data available for this combination of filters. Please adjust your selections.")
-    st.stop()
-
-# --- 4. BASELINE & ACTUALS CALCULATIONS ---
-total_gmv = df['amount_eur'].sum()
-actual_fraud_exposure = df[df['is_actual_chargeback'] == 1]['amount_eur'].sum()
-
-# Current Hardcoded State Calculations
-curr_tp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 1)]
-curr_benefit = curr_tp['amount_eur'].sum() + (len(curr_tp) * cb_fee)
-
-curr_fp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 0)]
-curr_margin_loss = curr_fp['amount_eur'].sum() * margin_pct
-curr_friction = curr_margin_loss + (len(curr_fp[curr_fp['payment_switch'] == 0]) * ltv_cost)
-
-fraud_missed = df[(df['is_actual_chargeback'] == 1) & (df['order_final_status'] == 'DELIVERED')]
-curr_fraud_loss = fraud_missed['amount_eur'].sum() + (len(fraud_missed) * cb_fee)
-
-actual_nfi = curr_benefit - curr_friction - curr_fraud_loss
-
-# --- 5. THE KPI & AGGREGATION LOGIC ---
-if market == 'All Markets':
-    sum_max_nfi = 0
-    # Calculate the Global Curve for the visual
-    df_curve, global_opt, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
-    
-    for m in df['global_entity_id'].unique():
-        m_df = df[df['global_entity_id'] == m]
-        m_fp = m_df[(m_df['rule_name'] != 'No_Rule') & (m_df['order_final_status'] == 'CANCELLED') & (m_df['is_actual_chargeback'] == 0)]
-        m_fric = (m_fp['amount_eur'].sum() * margin_pct) + (len(m_fp[m_fp['payment_switch'] == 0]) * ltv_cost)
-        _, m_opt, _ = calculate_frontier(m_df, margin_pct, cb_fee, ltv_cost, m_fric)
-        sum_max_nfi += m_opt['NFI']
-    
-    max_nfi_display = sum_max_nfi
-    optimal_threshold_display = "Market-Specific"
-    # This 'opt_point' is what the chart uses to draw the Star
-    opt_point = global_opt 
-else:
-    # Single market view
-    df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
-    max_nfi_display = opt_point['NFI']
-    optimal_threshold_display = f"{opt_point['Threshold']:.1f}"
-
-# --- 6. OPTIMAL VS ACTUAL BENCHMARK ROW ---
-st.markdown("### 2. Optimal vs. Actual Benchmark")
-b1, b2, b3, b4 = st.columns(4)
-
-b1.metric("Total Processed GMV", f"€{total_gmv:,.0f}")
-exposure_delta = actual_fraud_exposure - (curr_benefit - (len(curr_tp) * cb_fee))
-b2.metric("Underlying Fraud Exposure", f"€{actual_fraud_exposure:,.0f}", f"-€{exposure_delta:,.0f} caught")
-
-nfi_delta = max_nfi_display - actual_nfi
-b3.metric("Max Net Financial Impact", f"€{max_nfi_display:,.0f}", f"{nfi_delta:+,.0f} vs Actual", delta_color="normal" if nfi_delta > 0 else "off")
-b4.metric("Optimal Risk Threshold", optimal_threshold_display, f"vs Actual eq. {actual_eq_thresh:.1f}")
-
-# --- 4. THE IMPROVED FRONTIER ENGINE ---
+# --- 2. FRONTIER CALCULATION ENGINE ---
 def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
-    # Increase granularity to 200 steps to find the absolute mathematical peak
+    # High granularity simulation
     thresholds = np.linspace(1, 99, 200)
     curve = []
     
-    # Identify if the current segment primarily uses 3DS or Hard Blocks
     non_rule_df = df_subset[df_subset['rule_name'] != 'No_Rule']
     primary_action = non_rule_df['rule_action'].mode()[0] if not non_rule_df.empty else 'hard_block'
 
@@ -200,14 +114,12 @@ def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
         fp_df = df_subset[fp_mask]
         
         if primary_action == 'review':
-            # Simulate 3DS: 20% drop-off, of which 35% recover via switch (65% churn)
-            drop_rate = 0.20
+            drop_rate = 0.20 # 3DS Drop-off
             friction = (fp_df['amount_eur'].sum() * drop_rate * margin) + (len(fp_df) * drop_rate * 0.65 * ltv)
         else:
-            # Simulate Hard Block: 100% drop, 65% churn
             friction = (fp_df['amount_eur'].sum() * margin) + (len(fp_df) * 0.65 * ltv)
         
-        # 3. Missed Fraud (The Penalty)
+        # 3. Missed Fraud
         missed_mask = (~sim_blocked) & (df_subset['is_actual_chargeback'] == 1)
         missed_loss = df_subset.loc[missed_mask, 'amount_eur'].sum() + (missed_mask.sum() * fee)
         
@@ -223,139 +135,163 @@ def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
     
     return df_c, opt_row, actual_eq_row['Threshold']
 
-# --- 5. THE KPI & AGGREGATION LOGIC ---
+# --- 3. MAIN APP LOGIC ---
+df_raw = get_or_create_data()
+
+st.sidebar.header("1. Global Filters")
+if st.sidebar.button("🔄 Clear Cache & Regenerate"):
+    st.cache_data.clear()
+    st.rerun()
+
+market_opt = ['All Markets'] + sorted(list(df_raw['global_entity_id'].unique()))
+market = st.sidebar.selectbox("Market Entity", options=market_opt)
+
+month_opt = ['All Months'] + sorted(list(df_raw['Month'].unique()))
+month = st.sidebar.selectbox("Month", options=month_opt)
+
+vertical_opt = ['All Verticals'] + sorted(list(df_raw['vendor_vertical'].unique()))
+vertical = st.sidebar.selectbox("Vendor Vertical", options=vertical_opt)
+
+is_saved = st.sidebar.selectbox("Card Status", options=['All Cards', 'Saved Card Only', 'New Card Only'])
+
+st.sidebar.header("2. Economic Assumptions")
+margin_pct = st.sidebar.slider("Net Profit Margin (%)", 1, 30, 10) / 100.0
+cb_fee = st.sidebar.number_input("Chargeback Fee (€)", value=15.0)
+ltv_cost = st.sidebar.number_input("Blended LTV Cost per Churn (€)", value=50.0)
+
+# Apply Filters
+df = df_raw.copy()
+if market != 'All Markets': df = df[df['global_entity_id'] == market]
+if month != 'All Months': df = df[df['Month'] == month]
+if vertical != 'All Verticals': df = df[df['vendor_vertical'] == vertical]
+if is_saved == 'Saved Card Only': df = df[df['is_saved_card'] == True]
+elif is_saved == 'New Card Only': df = df[df['is_saved_card'] == False]
+
+st.title("🛡️ Fraud Prevention Efficient Frontier")
+
+if df.empty:
+    st.warning("No data available for this filter combination.")
+    st.stop()
+
+# --- 4. CALC ACTUALS ---
+total_gmv = df['amount_eur'].sum()
+actual_fraud_exposure = df[df['is_actual_chargeback'] == 1]['amount_eur'].sum()
+
+curr_tp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 1)]
+curr_benefit = curr_tp['amount_eur'].sum() + (len(curr_tp) * cb_fee)
+
+curr_fp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 0)]
+curr_friction = (curr_fp['amount_eur'].sum() * margin_pct) + (len(curr_fp[curr_fp['payment_switch'] == 0]) * ltv_cost)
+
+fraud_missed = df[(df['is_actual_chargeback'] == 1) & (df['order_final_status'] == 'DELIVERED')]
+curr_fraud_loss = fraud_missed['amount_eur'].sum() + (len(fraud_missed) * cb_fee)
+
+actual_nfi = curr_benefit - curr_friction - curr_fraud_loss
+
+# --- 5. SECTION 1: FINANCIAL IMPACT ---
+st.markdown("### 1. Actual Financial Impact (Current Rules State)")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Net Financial Impact", f"€{actual_nfi:,.0f}")
+c2.metric("Fraud Prevented (Benefit)", f"€{curr_benefit:,.0f}")
+c3.metric("Cost of False Positives", f"-€{curr_friction:,.0f}")
+c4.metric("Cost of Fraud (Missed)", f"-€{curr_fraud_loss:,.0f}")
+
+cr1, cr2, cr3, cr4 = st.columns(4)
+cr1.metric("NFI Rate", f"{(actual_nfi/total_gmv)*100:.2f}%")
+cr2.metric("Benefit Rate", f"{(curr_benefit/total_gmv)*100:.2f}%")
+cr3.metric("FP Rate (GMV)", f"{(curr_friction/total_gmv)*100:.2f}%", delta_color="inverse")
+cr4.metric("Fraud Loss Rate", f"{(curr_fraud_loss/total_gmv)*100:.2f}%", delta_color="inverse")
+
+st.divider()
+
+# --- 6. SECTION 2: BENCHMARK & FRONTIER ---
+# Calculate optimization variables
 if market == 'All Markets':
-    # Calculate 'Sum of Optimals' for the Global KPI
     sum_max_nfi = 0
+    # Global Curve for chart
+    df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
+    # Sum of individual market peaks for the KPI
     for m in df['global_entity_id'].unique():
         m_df = df[df['global_entity_id'] == m]
-        # Calculate individual friction for this market to find local eq threshold
-        m_fp = m_df[(m_df['rule_name'] != 'No_Rule') & (m_df['order_final_status'] == 'CANCELLED') & (m_df['is_actual_chargeback'] == 0)]
-        m_fric = (m_fp['amount_eur'].sum() * margin_pct) + (len(m_fp[m_fp['payment_switch'] == 0]) * ltv_cost)
-        
-        _, m_opt, _ = calculate_frontier(m_df, margin_pct, cb_fee, ltv_cost, m_fric)
+        m_fp_curr = m_df[(m_df['rule_name'] != 'No_Rule') & (m_df['order_final_status'] == 'CANCELLED') & (m_df['is_actual_chargeback'] == 0)]
+        m_fric_curr = (m_fp_curr['amount_eur'].sum() * margin_pct) + (len(m_fp_curr[m_fp_curr['payment_switch'] == 0]) * ltv_cost)
+        _, m_opt, _ = calculate_frontier(m_df, margin_pct, cb_fee, ltv_cost, m_fric_curr)
         sum_max_nfi += m_opt['NFI']
-    
-    # Generate the global curve for the visual chart
-    df_curve, global_opt, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
     max_nfi_display = sum_max_nfi
-    optimal_threshold_display = "Market-Specific" 
+    opt_thresh_display = "Market-Specific"
 else:
-    # Single market view
     df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
     max_nfi_display = opt_point['NFI']
-    optimal_threshold_display = f"{opt_point['Threshold']:.1f}"
+    opt_thresh_display = f"{opt_point['Threshold']:.1f}"
 
-# --- 6. OPTIMAL VS ACTUAL BENCHMARK ROW ---
 st.markdown("### 2. Optimal vs. Actual Benchmark")
 b1, b2, b3, b4 = st.columns(4)
-
-b1.metric("Total Processed GMV", f"€{total_gmv:,.0f}")
-exposure_delta = actual_fraud_exposure - (curr_benefit - (len(curr_tp) * cb_fee)) # Extract GMV caught
+b1.metric("Total GMV", f"€{total_gmv:,.0f}")
+exposure_delta = actual_fraud_exposure - (curr_benefit - (len(curr_tp) * cb_fee))
 b2.metric("Underlying Fraud Exposure", f"€{actual_fraud_exposure:,.0f}", f"-€{exposure_delta:,.0f} caught")
+nfi_gap = max_nfi_display - actual_nfi
+b3.metric("Max Net Financial Impact", f"€{max_nfi_display:,.0f}", f"{nfi_gap:+,.0f} vs Actual")
+b4.metric("Optimal Risk Threshold", opt_thresh_display, f"vs Actual eq. {actual_eq_thresh:.1f}")
 
-nfi_delta = max_nfi_display - actual_nfi
-b3.metric("Max Net Financial Impact", f"€{max_nfi_display:,.0f}", f"{nfi_delta:+,.0f} vs Actual", delta_color="normal" if nfi_delta > 0 else "off")
-
-b4.metric("Optimal Risk Threshold", optimal_threshold_display, f"vs Actual eq. {actual_eq_thresh:.1f}")
-
-# --- 8. PLOT EFFICIENT FRONTIER ---
+# --- 7. PLOT ---
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=df_curve['Friction (€)'], y=df_curve['Benefit (€)'], mode='lines', name='Risk Score Frontier', line=dict(color='royalblue', width=3)))
-fig.add_trace(go.Scatter(x=[opt_point['Friction (€)']], y=[opt_point['Benefit (€)']], mode='markers', name='Optimal Setup (Peak NFI)', marker=dict(color='orange', size=14, symbol='star')))
-fig.add_trace(go.Scatter(x=[curr_friction], y=[curr_benefit], mode='markers', name='Current Rules State', marker=dict(color='red', size=12, symbol='x')))
-fig.update_layout(title='Efficient Frontier: Where we are vs. Where we could be', xaxis_title='Cost of Friction (Lost Margin + Churn LTV) €', yaxis_title='Fraud & Fees Prevented €', hovermode="x unified")
+fig.add_trace(go.Scatter(x=[opt_point['Friction (€)']], y=[opt_point['Benefit (€)']], mode='markers', name='Optimal Point', marker=dict(color='orange', size=14, symbol='star')))
+fig.add_trace(go.Scatter(x=[curr_friction], y=[curr_benefit], mode='markers', name='Current Rules', marker=dict(color='red', size=12, symbol='x')))
+fig.update_layout(title='Efficient Frontier', xaxis_title='Friction Cost €', yaxis_title='Benefit €', hovermode="x unified")
 st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
-# --- 9. FRICTION DEEP-DIVE VISUALS ---
-st.markdown("### 3. Friction Deep-Dive: Where are we losing money?")
-fig_col1, fig_col2, fig_col3 = st.columns(3)
+# --- 8. SECTION 3: DEEP DIVES ---
+st.markdown("### 3. Friction Deep-Dive")
+fd1, fd2, fd3 = st.columns(3)
 
-if curr_fp.empty:
-    st.info("No False Positives generated by the current filters. Your friction is €0!")
-else:
+if not curr_fp.empty:
     # Funnel
-    total_fp_count = len(curr_fp)
-    recovered_count = int(curr_fp['payment_switch'].sum())
-    churned_count = total_fp_count - recovered_count
-
-    fig_funnel = go.Figure(go.Funnel(
-        y=["Total Blocked (Good)", "Lost / Churned", "Recovered (Switched)"],
-        x=[total_fp_count, churned_count, recovered_count],
-        textinfo="value+percent initial",
-        marker={"color": ["#636EFA", "#EF553B", "#00CC96"]}
-    ))
-    fig_funnel.update_layout(title="Payment Switch Recovery", margin=dict(t=40, b=20, l=0, r=0))
-    fig_col1.plotly_chart(fig_funnel, use_container_width=True)
-
-    # Donut
-    fp_new = curr_fp[curr_fp['customer_source_type'] == 'New']
-    fp_exist = curr_fp[curr_fp['customer_source_type'] == 'Existing']
+    total_fp = len(curr_fp)
+    recovered = int(curr_fp['payment_switch'].sum())
+    fig_f = go.Figure(go.Funnel(y=["Blocked", "Lost", "Recovered"], x=[total_fp, total_fp-recovered, recovered]))
+    fd1.plotly_chart(fig_f, use_container_width=True)
     
-    fric_new = (fp_new['amount_eur'].sum() * margin_pct) + (len(fp_new[fp_new['payment_switch'] == 0]) * ltv_cost)
-    fric_exist = (fp_exist['amount_eur'].sum() * margin_pct) + (len(fp_exist[fp_exist['payment_switch'] == 0]) * ltv_cost)
-
-    fig_pie1 = go.Figure(data=[go.Pie(labels=['New Users', 'Existing Users'], values=[fric_new, fric_exist], hole=.4, marker_colors=["#AB63FA", "#FFA15A"])])
-    fig_pie1.update_layout(title="Friction Cost (€) by User Type", margin=dict(t=40, b=20, l=0, r=0))
-    fig_col2.plotly_chart(fig_pie1, use_container_width=True)
-
-    # Pie
-    action_counts = curr_fp['rule_action'].value_counts().reset_index()
-    action_counts.columns = ['Action', 'Count']
-    action_counts['Action'] = action_counts['Action'].map({'review': '3DS Drop-off', 'hard_block': 'Hard Decline'})
-
-    fig_pie2 = go.Figure(data=[go.Pie(labels=action_counts['Action'], values=action_counts['Count'], hole=.4, marker_colors=["#19D3F3", "#FF6692"])])
-    fig_pie2.update_layout(title="False Positives by Action Type", margin=dict(t=40, b=20, l=0, r=0))
-    fig_col3.plotly_chart(fig_pie2, use_container_width=True)
+    # User Type Donut
+    fp_new = curr_fp[curr_fp['customer_source_type'] == 'New']
+    fp_old = curr_fp[curr_fp['customer_source_type'] == 'Existing']
+    f_new = (fp_new['amount_eur'].sum() * margin_pct) + (len(fp_new[fp_new['payment_switch'] == 0]) * ltv_cost)
+    f_old = (fp_old['amount_eur'].sum() * margin_pct) + (len(fp_old[fp_old['payment_switch'] == 0]) * ltv_cost)
+    fig_d = go.Figure(data=[go.Pie(labels=['New', 'Existing'], values=[f_new, f_old], hole=.4)])
+    fd2.plotly_chart(fig_d, use_container_width=True)
+    
+    # Action Pie
+    act_counts = curr_fp['rule_action'].value_counts()
+    fig_p = go.Figure(data=[go.Pie(labels=act_counts.index, values=act_counts.values, hole=.4)])
+    fd3.plotly_chart(fig_p, use_container_width=True)
 
 st.divider()
 
-# --- 10. MONTHLY BENCHMARK TABLE ---
-st.subheader("Market & Monthly Threshold Benchmarks")
-benchmark_data = []
-for (mkt, mth), group_df in df.groupby(['global_entity_id', 'Month']):
-    if len(group_df) < 50: continue 
-    
-    g_fp = group_df[(group_df['rule_name'] != 'No_Rule') & (group_df['order_final_status'] == 'CANCELLED') & (group_df['is_actual_chargeback'] == 0)]
-    g_curr_friction = (g_fp['amount_eur'].sum() * margin_pct) + (len(g_fp[g_fp['payment_switch'] == 0]) * ltv_cost)
-    
-    _, opt_row, act_thresh = calculate_frontier(group_df, margin_pct, cb_fee, ltv_cost, g_curr_friction)
-    
-    diff = opt_row['Threshold'] - act_thresh
-    status = "Too Stiff (Over-blocking)" if diff > 5 else "Too Loose (Under-blocking)" if diff < -5 else "Target Met"
-    benchmark_data.append({'Market': mkt, 'Month': mth, 'Optimal Threshold': round(opt_row['Threshold'], 1), 'Equivalent Actual Threshold': round(act_thresh, 1), 'Difference': round(diff, 1), 'Status': status})
+# --- 9. TABLES ---
+st.subheader("Market Benchmarks")
+bench_list = []
+for (mkt, mth), g_df in df.groupby(['global_entity_id', 'Month']):
+    if len(g_df) < 50: continue
+    g_fp = g_df[(g_df['rule_name'] != 'No_Rule') & (g_df['order_final_status'] == 'CANCELLED') & (g_df['is_actual_chargeback'] == 0)]
+    g_fric = (g_fp['amount_eur'].sum() * margin_pct) + (len(g_fp[g_fp['payment_switch'] == 0]) * ltv_cost)
+    _, g_opt, g_act_t = calculate_frontier(g_df, margin_pct, cb_fee, ltv_cost, g_fric)
+    diff = g_opt['Threshold'] - g_act_t
+    status = "Too Stiff" if diff > 5 else "Too Loose" if diff < -5 else "Target Met"
+    bench_list.append({'Market': mkt, 'Month': mth, 'Opt Thresh': round(g_opt['Threshold'], 1), 'Act Eq Thresh': round(g_act_t, 1), 'Status': status})
 
-if benchmark_data:
-    df_bench = pd.DataFrame(benchmark_data).sort_values(by=['Market', 'Month'])
-    st.dataframe(df_bench.style.map(lambda v: f"color: {'red' if 'Over' in v else 'orange' if 'Under' in v else 'green'}", subset=['Status']), use_container_width=True, hide_index=True)
+if bench_list:
+    st.dataframe(pd.DataFrame(bench_list), use_container_width=True)
 
-# --- 11. RULE LEVEL ATTRIBUTION ---
-st.subheader("Granular Rule Performance & Accuracy")
-rule_stats = []
-active_rules = df[df['rule_name'] != 'No_Rule']['rule_name'].unique()
-
-for rule in active_rules:
+st.subheader("Rule Level Breakdown")
+rule_list = []
+for rule in df[df['rule_name'] != 'No_Rule']['rule_name'].unique():
     r_df = df[df['rule_name'] == rule]
-    if r_df.empty: continue
-    
-    tp_df = r_df[(r_df['is_actual_chargeback'] == 1) & (r_df['order_final_status'] == 'CANCELLED')]
-    ben = tp_df['amount_eur'].sum() + (len(tp_df) * cb_fee)
-    
-    fp_df = r_df[(r_df['is_actual_chargeback'] == 0) & (r_df['order_final_status'] == 'CANCELLED')]
-    fric = (fp_df['amount_eur'].sum() * margin_pct) + (len(fp_df[fp_df['payment_switch'] == 0]) * ltv_cost)
-    
-    rule_stats.append({
-        'Rule Name': rule,
-        'Action': r_df['rule_action'].iloc[0],
-        'Capture Rate (%)': (tp_df['amount_eur'].sum() / actual_fraud_exposure * 100) if actual_fraud_exposure > 0 else 0,
-        'Precision (%)': (len(tp_df) / (len(tp_df) + len(fp_df)) * 100) if (len(tp_df) + len(fp_df)) > 0 else 0,
-        'Friction Ratio': f"1 : {(len(fp_df)/len(tp_df)):.1f}" if len(tp_df) > 0 else "∞",
-        'TPs (Caught Fraud)': len(tp_df),
-        'FPs (Lost Users)': len(fp_df),
-        'Net Impact (€)': ben - fric
-    })
+    rtp = r_df[(r_df['is_actual_chargeback'] == 1) & (r_df['order_final_status'] == 'CANCELLED')]
+    rfp = r_df[(r_df['is_actual_chargeback'] == 0) & (r_df['order_final_status'] == 'CANCELLED')]
+    ben = rtp['amount_eur'].sum() + (len(rtp) * cb_fee)
+    fric = (rfp['amount_eur'].sum() * margin_pct) + (len(rfp[rfp['payment_switch'] == 0]) * ltv_cost)
+    rule_list.append({'Rule': rule, 'Benefit': ben, 'Friction': fric, 'Net Impact': ben-fric, 'Precision': len(rtp)/(len(rtp)+len(rfp))*100 if (len(rtp)+len(rfp))>0 else 0})
 
-if rule_stats:
-    st.dataframe(pd.DataFrame(rule_stats).sort_values('Net Impact (€)', ascending=False).style.format({'Net Impact (€)': '€{:,.0f}', 'Capture Rate (%)': '{:.1f}%', 'Precision (%)': '{:.1f}%'}), use_container_width=True)
+st.dataframe(pd.DataFrame(rule_list).sort_values('Net Impact', ascending=False), use_container_width=True)
