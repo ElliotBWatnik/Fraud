@@ -61,11 +61,68 @@ curr_fp = df[(df['rule_name'] != 'None') & (df['order_final_status'] == 'CANCELL
 curr_margin_loss = curr_fp['amount_eur'].sum() * margin_pct
 curr_friction = curr_margin_loss + (len(curr_fp[curr_fp['payment_switch'] == 0]) * ltv_cost)
 
-# --- DYNAMIC KPIs (FINANCIAL) ---
-st.markdown("### Financial Impact")
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Processed GMV", f"€{total_gmv:,.0f}")
-col2.metric("Underlying Fraud Exposure", f"€{actual_fraud_gmv:,.0f}")
+# --- BASELINE & ACTUALS CALCULATIONS ---
+total_gmv = df['amount_eur'].sum()
+actual_fraud_exposure = df[df['is_actual_chargeback'] == 1]['amount_eur'].sum()
+
+# Current Hardcoded State Calculations
+# 1. Fraud Prevented (Benefit)
+curr_tp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 1)]
+curr_benefit = curr_tp['amount_eur'].sum() + (len(curr_tp) * cb_fee)
+
+# 2. Friction Cost (False Positives)
+curr_fp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 0)]
+curr_margin_loss = curr_fp['amount_eur'].sum() * margin_pct
+curr_friction = curr_margin_loss + (len(curr_fp[curr_fp['payment_switch'] == 0]) * ltv_cost)
+
+# 3. Fraud Loss (Slipped Through)
+fraud_missed = df[(df['is_actual_chargeback'] == 1) & (df['order_final_status'] == 'DELIVERED')]
+curr_fraud_loss = fraud_missed['amount_eur'].sum() + (len(fraud_missed) * cb_fee)
+
+# 4. Actual Net Financial Impact
+actual_nfi = curr_benefit - curr_friction
+
+# --- NEW SECTION 1: ACTUAL FINANCIAL IMPACT & RATES ---
+st.markdown("### 1. Actual Financial Impact (Current State)")
+col1, col2, col3 = st.columns(3)
+
+col1.metric("Net Financial Impact", f"€{actual_nfi:,.0f}")
+col2.metric("Cost of Fraud (Losses & Fees)", f"€{curr_fraud_loss:,.0f}")
+col3.metric("Cost of False Positives (Friction)", f"€{curr_friction:,.0f}")
+
+col1_rate, col2_rate, col3_rate = st.columns(3)
+nfi_rate = (actual_nfi / total_gmv) * 100 if total_gmv > 0 else 0
+fraud_loss_rate = (curr_fraud_loss / total_gmv) * 100 if total_gmv > 0 else 0
+friction_rate = (curr_friction / total_gmv) * 100 if total_gmv > 0 else 0
+
+col1_rate.metric("NFI Rate (% of GMV)", f"{nfi_rate:.2f}%", help="Value added to the platform per € transacted.")
+col2_rate.metric("Fraud Loss Rate (% of GMV)", f"{fraud_loss_rate:.2f}%", delta_color="inverse")
+col3_rate.metric("False Positive Rate (% of GMV)", f"{friction_rate:.2f}%", delta_color="inverse")
+
+st.divider()
+
+# --- CALCULATE FRONTIER FOR BENCHMARKING ---
+df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost)
+
+# --- NEW SECTION 2: OPTIMAL VS. ACTUAL BENCHMARK ---
+st.markdown("### 2. Optimal vs. Actual Benchmark")
+b1, b2, b3, b4 = st.columns(4)
+
+b1.metric("Total Processed GMV", f"€{total_gmv:,.0f}")
+
+# Underlying exposure vs Actual Fraud Loss
+exposure_delta = actual_fraud_exposure - curr_fraud_loss
+b2.metric("Underlying Fraud Exposure", f"€{actual_fraud_exposure:,.0f}", f"-€{exposure_delta:,.0f} caught", delta_color="normal")
+
+# Max NFI vs Actual NFI
+nfi_delta = opt_point['NFI'] - actual_nfi
+b3.metric("Max Net Financial Impact", f"€{opt_point['NFI']:,.0f}", f"{nfi_delta:+,.0f} vs Actual", delta_color="normal" if nfi_delta > 0 else "off")
+
+# Optimal Threshold vs Actual Equivalent Threshold
+thresh_delta = opt_point['Threshold'] - actual_eq_thresh
+b4.metric("Optimal Risk Threshold", f"{opt_point['Threshold']:.1f}", f"{thresh_delta:+.1f} vs Actual", delta_color="off")
+
+st.divider()
 
 # --- HELPER FUNCTION: CALCULATE FRONTIER & ACTUALS ---
 def calculate_frontier(df_subset, margin, fee, ltv):
