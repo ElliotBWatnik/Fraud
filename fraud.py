@@ -48,10 +48,22 @@ if df.empty:
     st.warning("No data available for this combination of filters. Please adjust your selections.")
     st.stop()
 
-# --- DYNAMIC KPIs ---
-col1, col2, col3, col4 = st.columns(4)
+# --- GLOBAL VARIABLES FOR BASELINE ---
 total_gmv = df['amount_eur'].sum()
 actual_fraud_gmv = df[df['is_actual_chargeback'] == 1]['amount_eur'].sum()
+actual_good_gmv = df[df['is_actual_chargeback'] == 0]['amount_eur'].sum()
+
+# Current Hardcoded State Calculations
+curr_tp = df[(df['rule_name'] != 'None') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 1)]
+curr_benefit = curr_tp['amount_eur'].sum() + (len(curr_tp) * cb_fee)
+
+curr_fp = df[(df['rule_name'] != 'None') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 0)]
+curr_margin_loss = curr_fp['amount_eur'].sum() * margin_pct
+curr_friction = curr_margin_loss + (len(curr_fp[curr_fp['payment_switch'] == 0]) * ltv_cost)
+
+# --- DYNAMIC KPIs (FINANCIAL) ---
+st.markdown("### Financial Impact")
+col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Processed GMV", f"€{total_gmv:,.0f}")
 col2.metric("Underlying Fraud Exposure", f"€{actual_fraud_gmv:,.0f}")
 
@@ -60,15 +72,6 @@ def calculate_frontier(df_subset, margin, fee, ltv):
     thresholds = np.linspace(5, 95, 40)
     curve = []
     
-    # 1. Current State (Hardcoded Rules)
-    curr_tp = df_subset[(df_subset['rule_name'] != 'None') & (df_subset['order_final_status'] == 'CANCELLED') & (df_subset['is_actual_chargeback'] == 1)]
-    curr_benefit = curr_tp['amount_eur'].sum() + (len(curr_tp) * fee)
-    
-    curr_fp = df_subset[(df_subset['rule_name'] != 'None') & (df_subset['order_final_status'] == 'CANCELLED') & (df_subset['is_actual_chargeback'] == 0)]
-    curr_margin_loss = curr_fp['amount_eur'].sum() * margin
-    curr_friction = curr_margin_loss + (len(curr_fp[curr_fp['payment_switch'] == 0]) * ltv)
-    
-    # 2. Simulated ML Frontier
     for t in thresholds:
         sim_blocked = df_subset['risk_score'] >= t
         tp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 1)
@@ -83,17 +86,32 @@ def calculate_frontier(df_subset, margin, fee, ltv):
     df_c = pd.DataFrame(curve)
     opt_row = df_c.loc[df_c['NFI'].idxmax()]
     
-    # Calculate "Equivalent Actual Threshold" based on closest Friction match
     df_c['Friction_Diff'] = abs(df_c['Friction (€)'] - curr_friction)
     actual_eq_row = df_c.loc[df_c['Friction_Diff'].idxmin()]
     
-    return df_c, opt_row, curr_benefit, curr_friction, actual_eq_row['Threshold']
+    return df_c, opt_row, actual_eq_row['Threshold']
 
-# --- MAIN CALCULATIONS ---
-df_curve, opt_point, curr_benefit, curr_friction, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost)
+df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost)
 
 col3.metric("Max Net Financial Impact", f"€{opt_point['NFI']:,.0f}")
 col4.metric("Optimal Risk Threshold", f"{opt_point['Threshold']:.1f}")
+
+# --- DYNAMIC KPIs (ACCURACY & CAPTURE RATES) ---
+st.markdown("### Current System Accuracy")
+acc1, acc2, acc3, acc4 = st.columns(4)
+
+fraud_caught_gmv = curr_tp['amount_eur'].sum()
+capture_rate = (fraud_caught_gmv / actual_fraud_gmv) * 100 if actual_fraud_gmv > 0 else 0
+
+good_blocked_gmv = curr_fp['amount_eur'].sum()
+fpr = (good_blocked_gmv / actual_good_gmv) * 100 if actual_good_gmv > 0 else 0
+
+overall_precision = (len(curr_tp) / (len(curr_tp) + len(curr_fp))) * 100 if (len(curr_tp) + len(curr_fp)) > 0 else 0
+
+acc1.metric("Fraud Capture Rate (Recall)", f"{capture_rate:.1f}%", help="What % of total fraud GMV did our rules catch?")
+acc2.metric("False Positive Rate (GMV)", f"{fpr:.2f}%", help="What % of good user GMV was wrongly blocked?", delta_color="inverse")
+acc3.metric("System Precision", f"{overall_precision:.1f}%", help="When a rule triggers, what is the probability it is actual fraud?")
+acc4.metric("Friction Ratio", f"1 : {(len(curr_fp)/len(curr_tp)):.1f}" if len(curr_tp) > 0 else "N/A", help="For every 1 fraudster caught, how many good users are blocked?")
 
 # --- PLOT EFFICIENT FRONTIER ---
 fig = go.Figure()
@@ -106,61 +124,53 @@ st.plotly_chart(fig, use_container_width=True)
 
 # --- NEW: MONTHLY MARKET BENCHMARK TABLE ---
 st.subheader("Market & Monthly Threshold Benchmarks")
-st.markdown("Compares the mathematical Optimal Threshold against the Equivalent Actual Threshold (based on the friction your hardcoded rules are currently causing).")
-
 benchmark_data = []
 groups = df.groupby(['global_entity_id', 'Month'])
 
 for (mkt, mth), group_df in groups:
-    # Skip groups that are too small to build a meaningful curve
     if len(group_df) < 50: continue 
-    
-    _, opt_row, _, _, act_thresh = calculate_frontier(group_df, margin_pct, cb_fee, ltv_cost)
-    
-    # If the Actual Equivalent is strictly lower than optimal, we are "Over-blocking" (too strict)
+    _, opt_row, act_thresh = calculate_frontier(group_df, margin_pct, cb_fee, ltv_cost)
     diff = opt_row['Threshold'] - act_thresh
     status = "Target Met"
     if diff > 5: status = "Too Stiff (Over-blocking)"
     elif diff < -5: status = "Too Loose (Under-blocking)"
         
     benchmark_data.append({
-        'Market': mkt,
-        'Month': mth,
-        'Optimal Threshold': round(opt_row['Threshold'], 1),
-        'Equivalent Actual Threshold': round(act_thresh, 1),
-        'Difference': round(diff, 1),
-        'Status': status
+        'Market': mkt, 'Month': mth, 'Optimal Threshold': round(opt_row['Threshold'], 1),
+        'Equivalent Actual Threshold': round(act_thresh, 1), 'Difference': round(diff, 1), 'Status': status
     })
 
 if benchmark_data:
     df_bench = pd.DataFrame(benchmark_data).sort_values(by=['Market', 'Month'])
-    
-    # Formatting for Streamlit display
-    def color_status(val):
-        color = 'red' if 'Over' in val else 'orange' if 'Under' in val else 'green'
-        return f'color: {color}'
-        
+    def color_status(val): return f"color: {'red' if 'Over' in val else 'orange' if 'Under' in val else 'green'}"
     st.dataframe(df_bench.style.map(color_status, subset=['Status']), use_container_width=True, hide_index=True)
-else:
-    st.info("Not enough data to generate monthly benchmarks with the current filters.")
 
-# --- RULE LEVEL ATTRIBUTION TABLE (Existing) ---
-st.subheader("Granular Rule Performance")
+# --- RULE LEVEL ATTRIBUTION TABLE (WITH ACCURACY METRICS) ---
+st.subheader("Granular Rule Performance & Accuracy")
 rule_stats = []
 active_rules = df[df['rule_name'] != 'None']['rule_name'].unique()
 
 for rule in active_rules:
     r_df = df[df['rule_name'] == rule]
     if r_df.empty: continue
+    
     tp_df = r_df[(r_df['is_actual_chargeback'] == 1) & (r_df['order_final_status'] == 'CANCELLED')]
     benefit = tp_df['amount_eur'].sum() + (len(tp_df) * cb_fee)
+    
     fp_df = r_df[(r_df['is_actual_chargeback'] == 0) & (r_df['order_final_status'] == 'CANCELLED')]
     friction = (fp_df['amount_eur'].sum() * margin_pct) + (len(fp_df[fp_df['payment_switch'] == 0]) * ltv_cost)
+    
+    # Calculate accuracy metrics
+    rule_capture = (tp_df['amount_eur'].sum() / actual_fraud_gmv) * 100 if actual_fraud_gmv > 0 else 0
+    rule_precision = (len(tp_df) / (len(tp_df) + len(fp_df))) * 100 if (len(tp_df) + len(fp_df)) > 0 else 0
+    friction_ratio = f"1 : {(len(fp_df)/len(tp_df)):.1f}" if len(tp_df) > 0 else "∞ (All FPs)"
     
     rule_stats.append({
         'Rule Name': rule,
         'Action': r_df['rule_action'].iloc[0],
-        'Triggers': len(r_df),
+        'Capture Rate (%)': rule_capture,
+        'Precision (%)': rule_precision,
+        'Friction Ratio (FP:TP)': friction_ratio,
         'TPs (Caught Fraud)': len(tp_df),
         'FPs (Lost Users)': len(fp_df),
         'Net Impact (€)': benefit - friction
@@ -168,4 +178,5 @@ for rule in active_rules:
 
 if rule_stats:
     df_rules = pd.DataFrame(rule_stats).sort_values('Net Impact (€)', ascending=False)
-    st.dataframe(df_rules.style.format({'Net Impact (€)': '€{:,.0f}'}), use_container_width=True)
+    st.dataframe(df_rules.style.format({
+        'Net Impact (€)': '€{:,.0f}',
