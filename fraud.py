@@ -165,21 +165,36 @@ col4_r.metric("Fraud Loss Rate", f"{fraud_loss_rate:.2f}%", delta_color="inverse
 
 st.divider()
 
-# --- 6. CALCULATE ML FRONTIER ---
+# --- 4. THE IMPROVED FRONTIER ENGINE ---
 def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
-    thresholds = np.linspace(5, 95, 40)
+    # Increase granularity to 200 steps to find the absolute mathematical peak
+    thresholds = np.linspace(1, 99, 200)
     curve = []
     
+    # Identify if the current segment primarily uses 3DS or Hard Blocks
+    non_rule_df = df_subset[df_subset['rule_name'] != 'No_Rule']
+    primary_action = non_rule_df['rule_action'].mode()[0] if not non_rule_df.empty else 'hard_block'
+
     for t in thresholds:
         sim_blocked = df_subset['risk_score'] >= t
         
+        # 1. Benefit (Fraud Prevented)
         tp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 1)
         benefit = df_subset.loc[tp_mask, 'amount_eur'].sum() + (tp_mask.sum() * fee)
         
+        # 2. Friction (False Positives)
         fp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 0)
         fp_df = df_subset[fp_mask]
-        friction = (fp_df['amount_eur'].sum() * margin) + (len(fp_df[fp_df['switch_propensity'] == 0]) * ltv)
         
+        if primary_action == 'review':
+            # Simulate 3DS: 20% drop-off, of which 35% recover via switch (65% churn)
+            drop_rate = 0.20
+            friction = (fp_df['amount_eur'].sum() * drop_rate * margin) + (len(fp_df) * drop_rate * 0.65 * ltv)
+        else:
+            # Simulate Hard Block: 100% drop, 65% churn
+            friction = (fp_df['amount_eur'].sum() * margin) + (len(fp_df) * 0.65 * ltv)
+        
+        # 3. Missed Fraud (The Penalty)
         missed_mask = (~sim_blocked) & (df_subset['is_actual_chargeback'] == 1)
         missed_loss = df_subset.loc[missed_mask, 'amount_eur'].sum() + (missed_mask.sum() * fee)
         
@@ -189,24 +204,47 @@ def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
     df_c = pd.DataFrame(curve)
     opt_row = df_c.loc[df_c['NFI'].idxmax()]
     
+    # Calculate equivalent threshold for the 'Red X' placement
     df_c['Friction_Diff'] = abs(df_c['Friction (€)'] - target_friction)
     actual_eq_row = df_c.loc[df_c['Friction_Diff'].idxmin()]
     
     return df_c, opt_row, actual_eq_row['Threshold']
 
-df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
+# --- 5. THE KPI & AGGREGATION LOGIC ---
+if market == 'All Markets':
+    # Calculate 'Sum of Optimals' for the Global KPI
+    sum_max_nfi = 0
+    for m in df['global_entity_id'].unique():
+        m_df = df[df['global_entity_id'] == m]
+        # Calculate individual friction for this market to find local eq threshold
+        m_fp = m_df[(m_df['rule_name'] != 'No_Rule') & (m_df['order_final_status'] == 'CANCELLED') & (m_df['is_actual_chargeback'] == 0)]
+        m_fric = (m_fp['amount_eur'].sum() * margin_pct) + (len(m_fp[m_fp['payment_switch'] == 0]) * ltv_cost)
+        
+        _, m_opt, _ = calculate_frontier(m_df, margin_pct, cb_fee, ltv_cost, m_fric)
+        sum_max_nfi += m_opt['NFI']
+    
+    # Generate the global curve for the visual chart
+    df_curve, global_opt, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
+    max_nfi_display = sum_max_nfi
+    optimal_threshold_display = "Market-Specific" 
+else:
+    # Single market view
+    df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
+    max_nfi_display = opt_point['NFI']
+    optimal_threshold_display = f"{opt_point['Threshold']:.1f}"
 
-# --- 7. OPTIMAL VS ACTUAL BENCHMARK ---
+# --- 6. OPTIMAL VS ACTUAL BENCHMARK ROW ---
 st.markdown("### 2. Optimal vs. Actual Benchmark")
 b1, b2, b3, b4 = st.columns(4)
 
 b1.metric("Total Processed GMV", f"€{total_gmv:,.0f}")
-exposure_delta = actual_fraud_exposure - curr_fraud_loss
-b2.metric("Underlying Fraud Exposure", f"€{actual_fraud_exposure:,.0f}", f"-€{exposure_delta:,.0f} caught", delta_color="normal")
-nfi_delta = opt_point['NFI'] - actual_nfi
-b3.metric("Max Net Financial Impact", f"€{opt_point['NFI']:,.0f}", f"{nfi_delta:+,.0f} vs Actual", delta_color="normal" if nfi_delta > 0 else "off")
-thresh_delta = opt_point['Threshold'] - actual_eq_thresh
-b4.metric("Optimal Risk Threshold", f"{opt_point['Threshold']:.1f}", f"{thresh_delta:+.1f} vs Actual eq.", delta_color="off")
+exposure_delta = actual_fraud_exposure - (curr_benefit - (len(curr_tp) * cb_fee)) # Extract GMV caught
+b2.metric("Underlying Fraud Exposure", f"€{actual_fraud_exposure:,.0f}", f"-€{exposure_delta:,.0f} caught")
+
+nfi_delta = max_nfi_display - actual_nfi
+b3.metric("Max Net Financial Impact", f"€{max_nfi_display:,.0f}", f"{nfi_delta:+,.0f} vs Actual", delta_color="normal" if nfi_delta > 0 else "off")
+
+b4.metric("Optimal Risk Threshold", optimal_threshold_display, f"vs Actual eq. {actual_eq_thresh:.1f}")
 
 # --- 8. PLOT EFFICIENT FRONTIER ---
 fig = go.Figure()
