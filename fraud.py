@@ -230,7 +230,12 @@ b1.metric("Total GMV", f"€{total_gmv:,.0f}")
 exposure_delta = actual_fraud_exposure - (curr_benefit - (len(curr_tp) * cb_fee))
 b2.metric("Underlying Fraud Exposure", f"€{actual_fraud_exposure:,.0f}", f"-€{exposure_delta:,.0f} caught")
 nfi_gap = max_nfi_display - actual_nfi
-b3.metric("Max Net Financial Impact", f"€{max_nfi_display:,.0f}", f"{nfi_gap:+,.0f} vs Actual")
+b3.metric(
+    "Max Net Financial Impact", 
+    f"€{max_nfi_display:,.0f}", 
+    f"{nfi_gap:+,.0f} vs Actual", 
+    delta_color="inverse" if nfi_gap > 0 else "normal"
+)
 b4.metric("Optimal Risk Threshold", opt_thresh_display, f"vs Actual eq. {actual_eq_thresh:.1f}")
 
 # --- 7. PLOT ---
@@ -282,7 +287,20 @@ for (mkt, mth), g_df in df.groupby(['global_entity_id', 'Month']):
     bench_list.append({'Market': mkt, 'Month': mth, 'Opt Thresh': round(g_opt['Threshold'], 1), 'Act Eq Thresh': round(g_act_t, 1), 'Status': status})
 
 if bench_list:
-    st.dataframe(pd.DataFrame(bench_list), use_container_width=True)
+    df_bench = pd.DataFrame(bench_list)
+    
+    # Define the color logic for the Status column
+    def color_status(val):
+        if val == "Too Stiff": color = '#EF553B' # Red
+        elif val == "Too Loose": color = '#FFA15A' # Orange
+        else: color = '#00CC96' # Green
+        return f'color: {color}; font-weight: bold'
+
+    st.dataframe(
+        df_bench.style.applymap(color_status, subset=['Status']),
+        use_container_width=True,
+        hide_index=True
+    )st.dataframe(pd.DataFrame(bench_list), use_container_width=True)
 
 st.subheader("Rule Level Breakdown")
 rule_list = []
@@ -294,4 +312,17 @@ for rule in df[df['rule_name'] != 'No_Rule']['rule_name'].unique():
     fric = (rfp['amount_eur'].sum() * margin_pct) + (len(rfp[rfp['payment_switch'] == 0]) * ltv_cost)
     rule_list.append({'Rule': rule, 'Benefit': ben, 'Friction': fric, 'Net Impact': ben-fric, 'Precision': len(rtp)/(len(rtp)+len(rfp))*100 if (len(rtp)+len(rfp))>0 else 0})
 
-st.dataframe(pd.DataFrame(rule_list).sort_values('Net Impact', ascending=False), use_container_width=True)
+if rule_list:
+    df_rules = pd.DataFrame(rule_list).sort_values('Net Impact', ascending=False)
+    
+    # Format numbers for readability
+    st.dataframe(
+        df_rules.style.format({
+            'Benefit': '€{:,.0f}',
+            'Friction': '€{:,.0f}',
+            'Net Impact': '€{:,.0f}',
+            'Precision': '{:.1f}%'
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
