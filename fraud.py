@@ -8,14 +8,13 @@ st.set_page_config(page_title="Fraud Optimization Engine", layout="wide")
 # --- 1. UNIFIED DATA GENERATOR & LOADER (HIGHLY POSITIVE SKEW) ---
 @st.cache_data
 def get_or_create_data():
-    np.random.seed(999) # New seed for the positive scenario
+    np.random.seed(999) 
     num_records = 30000
     
-    # Base distributions
     markets = ['FO_NO', 'FO_SE', 'FO_FI', 'FO_DK', 'FO_EE']
     entity_col = np.random.choice(markets, num_records, p=[0.25, 0.25, 0.20, 0.15, 0.15])
     dates = pd.date_range(start='2026-01-01', periods=num_records, freq='5T')
-    amount_eur = np.random.lognormal(mean=3.2, sigma=0.4, size=num_records).round(2) # Slightly higher GMV
+    amount_eur = np.random.lognormal(mean=3.2, sigma=0.4, size=num_records).round(2) 
 
     vendor_vertical = np.random.choice(['restaurants', 'supermarket', 'darkstores'], num_records, p=[0.6, 0.3, 0.1])
     customer_source_type = np.random.choice(['New', 'Existing'], num_records, p=[0.25, 0.75])
@@ -23,32 +22,24 @@ def get_or_create_data():
     issuer_country_group = np.random.choice(['Local', 'International'], num_records, p=[0.85, 0.15])
     is_3ds_eligible = np.random.choice([True, False], num_records, p=[0.9, 0.1])
 
-    # 1. First, decide who is actual fraud (approx 4% of traffic)
     base_fraud_prob = 0.04
     is_actual_chargeback = np.random.binomial(1, base_fraud_prob, num_records)
 
-    # 2. Generate highly accurate Risk Scores based on the truth
     risk_score = np.zeros(num_records)
     for i in range(num_records):
         if is_actual_chargeback[i] == 1:
-            # Fraudsters get very high scores (mean 85, std 10)
             risk_score[i] = np.random.normal(85, 10)
         else:
-            # Good users get very low scores (mean 15, std 10)
             risk_score[i] = np.random.normal(15, 10)
             
-    # Add a tiny bit of market noise
     risk_score = np.where(entity_col == 'FO_EE', risk_score + 5, risk_score)
     risk_score = np.where(entity_col == 'FO_NO', risk_score - 5, risk_score)
     risk_score = np.clip(risk_score, 0, 99).round(2)
 
-    # 3. Apply Highly Accurate Rules
     rule_triggered = np.array(['No_Rule'] * num_records, dtype=object)
     for i in range(num_records):
         mkt = entity_col[i]
         score = risk_score[i]
-        
-        # All markets are now configured relatively well, catching fraud without hitting good users
         if mkt == 'FO_NO':
             if score > 50: rule_triggered[i] = 'velocity_high_risk_block'
         elif mkt == 'FO_SE': 
@@ -63,8 +54,7 @@ def get_or_create_data():
     rule_action = np.where(pd.Series(rule_triggered).str.contains('block'), 'hard_block', 
                   np.where(pd.Series(rule_triggered) == 'No_Rule', 'none', 'review'))
 
-    # 4. Outcomes (Good users recover well, bad users fail)
-    switch_propensity = np.random.binomial(1, 0.40, num_records) # High recovery rate (40%)
+    switch_propensity = np.random.binomial(1, 0.40, num_records)
     payment_switch = np.zeros(num_records)
     order_final_status = np.array(['DELIVERED'] * num_records, dtype=object)
 
@@ -75,9 +65,8 @@ def get_or_create_data():
                 if is_actual_chargeback[i] == 0: payment_switch[i] = switch_propensity[i]
             elif rule_action[i] == 'review':
                 if is_actual_chargeback[i] == 1:
-                    order_final_status[i] = 'CANCELLED' # Fraud always fails 3DS
+                    order_final_status[i] = 'CANCELLED' 
                 else:
-                    # Very few good users drop off from 3DS in this scenario (only 15%)
                     drop_rate = 0.5 if not is_3ds_eligible[i] else 0.15
                     if np.random.rand() < drop_rate:
                         order_final_status[i] = 'CANCELLED'
@@ -100,6 +89,8 @@ def get_or_create_data():
         'is_actual_chargeback': is_actual_chargeback
     })
     return df
+
+df_raw = get_or_create_data()
 
 # --- 2. SIDEBAR FILTERS ---
 st.sidebar.header("1. Global Filters")
@@ -135,20 +126,17 @@ if df.empty:
 total_gmv = df['amount_eur'].sum()
 actual_fraud_exposure = df[df['is_actual_chargeback'] == 1]['amount_eur'].sum()
 
-# 1. Prevented Fraud (Benefit)
+# Current Hardcoded State Calculations
 curr_tp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 1)]
 curr_benefit = curr_tp['amount_eur'].sum() + (len(curr_tp) * cb_fee)
 
-# 2. Cost of False Positives (Friction)
 curr_fp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 0)]
 curr_margin_loss = curr_fp['amount_eur'].sum() * margin_pct
 curr_friction = curr_margin_loss + (len(curr_fp[curr_fp['payment_switch'] == 0]) * ltv_cost)
 
-# 3. Cost of Fraud (Missed / Slipped Through)
 fraud_missed = df[(df['is_actual_chargeback'] == 1) & (df['order_final_status'] == 'DELIVERED')]
 curr_fraud_loss = fraud_missed['amount_eur'].sum() + (len(fraud_missed) * cb_fee)
 
-# 4. ACTUAL NET FINANCIAL IMPACT (Matching your dashboard formula)
 actual_nfi = curr_benefit - curr_friction - curr_fraud_loss
 
 # --- 5. ACTUAL FINANCIAL IMPACT & RATES ---
@@ -167,9 +155,9 @@ friction_rate = (curr_friction / total_gmv) * 100 if total_gmv > 0 else 0
 fraud_loss_rate = (curr_fraud_loss / total_gmv) * 100 if total_gmv > 0 else 0
 
 col1_r.metric("NFI Rate (% of GMV)", f"{nfi_rate:.2f}%")
-col2_r.metric("Fraud Prevented Rate", f"{benefit_rate:.2f}%", help="Fraud saved as a % of GMV")
-col3_r.metric("False Positive Rate", f"{friction_rate:.2f}%", delta_color="inverse", help="Cost of friction as a % of GMV")
-col4_r.metric("Fraud Loss Rate", f"{fraud_loss_rate:.2f}%", delta_color="inverse", help="Fraud that slipped through as a % of GMV")
+col2_r.metric("Fraud Prevented Rate", f"{benefit_rate:.2f}%")
+col3_r.metric("False Positive Rate", f"{friction_rate:.2f}%", delta_color="inverse")
+col4_r.metric("Fraud Loss Rate", f"{fraud_loss_rate:.2f}%", delta_color="inverse")
 
 st.divider()
 
@@ -181,49 +169,18 @@ def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
     for t in thresholds:
         sim_blocked = df_subset['risk_score'] >= t
         
-        # 1. Prevented Fraud
         tp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 1)
         benefit = df_subset.loc[tp_mask, 'amount_eur'].sum() + (tp_mask.sum() * fee)
         
-        # 2. False Positives
         fp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 0)
         fp_df = df_subset[fp_mask]
         friction = (fp_df['amount_eur'].sum() * margin) + (len(fp_df[fp_df['switch_propensity'] == 0]) * ltv)
         
-        # 3. Missed Fraud
         missed_mask = (~sim_blocked) & (df_subset['is_actual_chargeback'] == 1)
         missed_loss = df_subset.loc[missed_mask, 'amount_eur'].sum() + (missed_mask.sum() * fee)
         
-        # NEW NFI Formula
         nfi = benefit - friction - missed_loss
-        
         curve.append({'Threshold': t, 'Benefit (€)': benefit, 'Friction (€)': friction, 'NFI': nfi})
-        
-    df_c = pd.DataFrame(curve)
-    opt_row = df_c.loc[df_c['NFI'].idxmax()]
-    
-    df_c['Friction_Diff'] = abs(df_c['Friction (€)'] - target_friction)
-    actual_eq_row = df_c.loc[df_c['Friction_Diff'].idxmin()]
-    
-    return df_c, opt_row, actual_eq_row['Threshold']
-
-df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
-
-# --- 6. CALCULATE ML FRONTIER ---
-def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
-    thresholds = np.linspace(5, 95, 40)
-    curve = []
-    
-    for t in thresholds:
-        sim_blocked = df_subset['risk_score'] >= t
-        tp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 1)
-        benefit = df_subset.loc[tp_mask, 'amount_eur'].sum() + (tp_mask.sum() * fee)
-        
-        fp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 0)
-        fp_df = df_subset[fp_mask]
-        friction = (fp_df['amount_eur'].sum() * margin) + (len(fp_df[fp_df['switch_propensity'] == 0]) * ltv)
-        
-        curve.append({'Threshold': t, 'Benefit (€)': benefit, 'Friction (€)': friction, 'NFI': benefit - friction})
         
     df_c = pd.DataFrame(curve)
     opt_row = df_c.loc[df_c['NFI'].idxmax()]
