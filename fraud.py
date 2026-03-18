@@ -5,10 +5,10 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Fraud Optimization Engine", layout="wide")
 
-# --- 1. UNIFIED DATA GENERATOR & LOADER (HIGHLY POSITIVE SKEW) ---
+# --- 1. UNIFIED DATA GENERATOR & LOADER (REALISTIC POSITIVE SKEW) ---
 @st.cache_data
 def get_or_create_data():
-    np.random.seed(999) 
+    np.random.seed(777) # New seed for balanced overlap
     num_records = 30000
     
     markets = ['FO_NO', 'FO_SE', 'FO_FI', 'FO_DK', 'FO_EE']
@@ -22,39 +22,43 @@ def get_or_create_data():
     issuer_country_group = np.random.choice(['Local', 'International'], num_records, p=[0.85, 0.15])
     is_3ds_eligible = np.random.choice([True, False], num_records, p=[0.9, 0.1])
 
+    # ~4% overall fraud rate
     base_fraud_prob = 0.04
     is_actual_chargeback = np.random.binomial(1, base_fraud_prob, num_records)
 
+    # THE FIX: Realistic overlap!
     risk_score = np.zeros(num_records)
     for i in range(num_records):
         if is_actual_chargeback[i] == 1:
-            risk_score[i] = np.random.normal(85, 10)
+            risk_score[i] = np.random.normal(70, 20) # Mean 70, but some fraudsters score low
         else:
-            risk_score[i] = np.random.normal(15, 10)
+            risk_score[i] = np.random.normal(25, 15) # Mean 25, but some good users score high
             
-    risk_score = np.where(entity_col == 'FO_EE', risk_score + 5, risk_score)
-    risk_score = np.where(entity_col == 'FO_NO', risk_score - 5, risk_score)
+    risk_score = np.where(entity_col == 'FO_EE', risk_score + 8, risk_score)
+    risk_score = np.where(entity_col == 'FO_NO', risk_score - 8, risk_score)
     risk_score = np.clip(risk_score, 0, 99).round(2)
 
     rule_triggered = np.array(['No_Rule'] * num_records, dtype=object)
     for i in range(num_records):
         mkt = entity_col[i]
         score = risk_score[i]
+        
+        # Rules set slightly sub-optimally to show the Red X below the peak
         if mkt == 'FO_NO':
-            if score > 50: rule_triggered[i] = 'velocity_high_risk_block'
+            if score > 45: rule_triggered[i] = 'velocity_high_risk_block'
         elif mkt == 'FO_SE': 
-            if score > 45: rule_triggered[i] = 'card_limit_value_3ds'
+            if score > 55: rule_triggered[i] = 'card_limit_value_3ds'
         elif mkt == 'FO_EE': 
-            if score > 55: rule_triggered[i] = 'foreign_card_review'
+            if score > 65: rule_triggered[i] = 'foreign_card_review'
         elif mkt == 'FO_FI':
-            if score > 48: rule_triggered[i] = 'card_account_age_7d_3ds'
+            if score > 50: rule_triggered[i] = 'card_account_age_7d_3ds'
         else: 
-            if score > 45: rule_triggered[i] = 'card_limit_value_3ds'
+            if score > 55: rule_triggered[i] = 'card_limit_value_3ds'
 
     rule_action = np.where(pd.Series(rule_triggered).str.contains('block'), 'hard_block', 
                   np.where(pd.Series(rule_triggered) == 'No_Rule', 'none', 'review'))
 
-    switch_propensity = np.random.binomial(1, 0.40, num_records)
+    switch_propensity = np.random.binomial(1, 0.35, num_records)
     payment_switch = np.zeros(num_records)
     order_final_status = np.array(['DELIVERED'] * num_records, dtype=object)
 
@@ -67,7 +71,7 @@ def get_or_create_data():
                 if is_actual_chargeback[i] == 1:
                     order_final_status[i] = 'CANCELLED' 
                 else:
-                    drop_rate = 0.5 if not is_3ds_eligible[i] else 0.15
+                    drop_rate = 0.6 if not is_3ds_eligible[i] else 0.2
                     if np.random.rand() < drop_rate:
                         order_final_status[i] = 'CANCELLED'
                         payment_switch[i] = switch_propensity[i]
