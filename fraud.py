@@ -5,54 +5,66 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Fraud Optimization Engine", layout="wide")
 
-# --- 1. UNIFIED DATA GENERATOR & LOADER ---
+# --- 1. UNIFIED DATA GENERATOR & LOADER (HIGHLY POSITIVE SKEW) ---
 @st.cache_data
 def get_or_create_data():
-    np.random.seed(42) # Fixed seed so the demo is stable
+    np.random.seed(999) # New seed for the positive scenario
     num_records = 30000
+    
+    # Base distributions
     markets = ['FO_NO', 'FO_SE', 'FO_FI', 'FO_DK', 'FO_EE']
     entity_col = np.random.choice(markets, num_records, p=[0.25, 0.25, 0.20, 0.15, 0.15])
     dates = pd.date_range(start='2026-01-01', periods=num_records, freq='5T')
-    amount_eur = np.random.lognormal(mean=3.0, sigma=0.5, size=num_records).round(2)
+    amount_eur = np.random.lognormal(mean=3.2, sigma=0.4, size=num_records).round(2) # Slightly higher GMV
 
     vendor_vertical = np.random.choice(['restaurants', 'supermarket', 'darkstores'], num_records, p=[0.6, 0.3, 0.1])
-    has_discount = np.random.choice([True, False], num_records, p=[0.2, 0.8])
     customer_source_type = np.random.choice(['New', 'Existing'], num_records, p=[0.25, 0.75])
     is_saved_card = np.where(customer_source_type == 'Existing', np.random.choice([True, False], num_records, p=[0.8, 0.2]), False)
     issuer_country_group = np.random.choice(['Local', 'International'], num_records, p=[0.85, 0.15])
     is_3ds_eligible = np.random.choice([True, False], num_records, p=[0.9, 0.1])
 
-    risk_score = np.random.beta(a=2, b=6, size=num_records) * 100
-    risk_score = np.where(entity_col == 'FO_EE', risk_score + 15, risk_score)
-    risk_score = np.where(entity_col == 'FO_NO', risk_score - 10, risk_score)
+    # 1. First, decide who is actual fraud (approx 4% of traffic)
+    base_fraud_prob = 0.04
+    is_actual_chargeback = np.random.binomial(1, base_fraud_prob, num_records)
+
+    # 2. Generate highly accurate Risk Scores based on the truth
+    risk_score = np.zeros(num_records)
+    for i in range(num_records):
+        if is_actual_chargeback[i] == 1:
+            # Fraudsters get very high scores (mean 85, std 10)
+            risk_score[i] = np.random.normal(85, 10)
+        else:
+            # Good users get very low scores (mean 15, std 10)
+            risk_score[i] = np.random.normal(15, 10)
+            
+    # Add a tiny bit of market noise
+    risk_score = np.where(entity_col == 'FO_EE', risk_score + 5, risk_score)
+    risk_score = np.where(entity_col == 'FO_NO', risk_score - 5, risk_score)
     risk_score = np.clip(risk_score, 0, 99).round(2)
 
-    prob = (risk_score / 100) ** 1.5 
-    prob = np.where(issuer_country_group == 'International', prob * 1.5, prob)
-    is_actual_chargeback = np.random.binomial(1, np.clip(prob, 0, 1))
-
+    # 3. Apply Highly Accurate Rules
     rule_triggered = np.array(['No_Rule'] * num_records, dtype=object)
     for i in range(num_records):
         mkt = entity_col[i]
         score = risk_score[i]
+        
+        # All markets are now configured relatively well, catching fraud without hitting good users
         if mkt == 'FO_NO':
-            if score > 30: rule_triggered[i] = 'velocity_high_risk_block'
-            elif score > 15: rule_triggered[i] = 'card_account_age_7d_3ds'
+            if score > 50: rule_triggered[i] = 'velocity_high_risk_block'
         elif mkt == 'FO_SE': 
-            if score > 60: rule_triggered[i] = 'velocity_high_risk_block'
-            elif score > 40: rule_triggered[i] = 'card_limit_value_3ds'
+            if score > 45: rule_triggered[i] = 'card_limit_value_3ds'
         elif mkt == 'FO_EE': 
-            if score > 80: rule_triggered[i] = 'foreign_card_review'
+            if score > 55: rule_triggered[i] = 'foreign_card_review'
         elif mkt == 'FO_FI':
-            if score > 50: rule_triggered[i] = 'card_limit_value_3ds'
-            elif score > 25: rule_triggered[i] = 'foreign_card_review'
+            if score > 48: rule_triggered[i] = 'card_account_age_7d_3ds'
         else: 
-            if score > 65: rule_triggered[i] = 'card_account_age_7d_3ds'
+            if score > 45: rule_triggered[i] = 'card_limit_value_3ds'
 
     rule_action = np.where(pd.Series(rule_triggered).str.contains('block'), 'hard_block', 
                   np.where(pd.Series(rule_triggered) == 'No_Rule', 'none', 'review'))
 
-    switch_propensity = np.random.binomial(1, 0.25, num_records)
+    # 4. Outcomes (Good users recover well, bad users fail)
+    switch_propensity = np.random.binomial(1, 0.40, num_records) # High recovery rate (40%)
     payment_switch = np.zeros(num_records)
     order_final_status = np.array(['DELIVERED'] * num_records, dtype=object)
 
@@ -63,9 +75,10 @@ def get_or_create_data():
                 if is_actual_chargeback[i] == 0: payment_switch[i] = switch_propensity[i]
             elif rule_action[i] == 'review':
                 if is_actual_chargeback[i] == 1:
-                    order_final_status[i] = 'CANCELLED'
+                    order_final_status[i] = 'CANCELLED' # Fraud always fails 3DS
                 else:
-                    drop_rate = 0.8 if not is_3ds_eligible[i] else 0.3
+                    # Very few good users drop off from 3DS in this scenario (only 15%)
+                    drop_rate = 0.5 if not is_3ds_eligible[i] else 0.15
                     if np.random.rand() < drop_rate:
                         order_final_status[i] = 'CANCELLED'
                         payment_switch[i] = switch_propensity[i]
@@ -87,8 +100,6 @@ def get_or_create_data():
         'is_actual_chargeback': is_actual_chargeback
     })
     return df
-
-df_raw = get_or_create_data()
 
 # --- 2. SIDEBAR FILTERS ---
 st.sidebar.header("1. Global Filters")
