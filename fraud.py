@@ -124,37 +124,79 @@ if df.empty:
 total_gmv = df['amount_eur'].sum()
 actual_fraud_exposure = df[df['is_actual_chargeback'] == 1]['amount_eur'].sum()
 
-# Current Hardcoded State Calculations
+# 1. Prevented Fraud (Benefit)
 curr_tp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 1)]
 curr_benefit = curr_tp['amount_eur'].sum() + (len(curr_tp) * cb_fee)
 
+# 2. Cost of False Positives (Friction)
 curr_fp = df[(df['rule_name'] != 'No_Rule') & (df['order_final_status'] == 'CANCELLED') & (df['is_actual_chargeback'] == 0)]
 curr_margin_loss = curr_fp['amount_eur'].sum() * margin_pct
 curr_friction = curr_margin_loss + (len(curr_fp[curr_fp['payment_switch'] == 0]) * ltv_cost)
 
+# 3. Cost of Fraud (Missed / Slipped Through)
 fraud_missed = df[(df['is_actual_chargeback'] == 1) & (df['order_final_status'] == 'DELIVERED')]
 curr_fraud_loss = fraud_missed['amount_eur'].sum() + (len(fraud_missed) * cb_fee)
 
-actual_nfi = curr_benefit - curr_friction
+# 4. ACTUAL NET FINANCIAL IMPACT (Matching your dashboard formula)
+actual_nfi = curr_benefit - curr_friction - curr_fraud_loss
 
 # --- 5. ACTUAL FINANCIAL IMPACT & RATES ---
 st.markdown("### 1. Actual Financial Impact (Current Rules State)")
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 
 col1.metric("Net Financial Impact", f"€{actual_nfi:,.0f}")
-col2.metric("Cost of Fraud (Losses & Fees)", f"€{curr_fraud_loss:,.0f}")
-col3.metric("Cost of False Positives (Friction)", f"€{curr_friction:,.0f}")
+col2.metric("Fraud Prevented (Benefit)", f"€{curr_benefit:,.0f}")
+col3.metric("Cost of False Positives", f"-€{curr_friction:,.0f}")
+col4.metric("Cost of Fraud (Missed)", f"-€{curr_fraud_loss:,.0f}")
 
-col1_r, col2_r, col3_r = st.columns(3)
+col1_r, col2_r, col3_r, col4_r = st.columns(4)
 nfi_rate = (actual_nfi / total_gmv) * 100 if total_gmv > 0 else 0
-fraud_loss_rate = (curr_fraud_loss / total_gmv) * 100 if total_gmv > 0 else 0
+benefit_rate = (curr_benefit / total_gmv) * 100 if total_gmv > 0 else 0
 friction_rate = (curr_friction / total_gmv) * 100 if total_gmv > 0 else 0
+fraud_loss_rate = (curr_fraud_loss / total_gmv) * 100 if total_gmv > 0 else 0
 
 col1_r.metric("NFI Rate (% of GMV)", f"{nfi_rate:.2f}%")
-col2_r.metric("Fraud Loss Rate (% of GMV)", f"{fraud_loss_rate:.2f}%", delta_color="inverse")
-col3_r.metric("False Positive Rate (% of GMV)", f"{friction_rate:.2f}%", delta_color="inverse")
+col2_r.metric("Fraud Prevented Rate", f"{benefit_rate:.2f}%", help="Fraud saved as a % of GMV")
+col3_r.metric("False Positive Rate", f"{friction_rate:.2f}%", delta_color="inverse", help="Cost of friction as a % of GMV")
+col4_r.metric("Fraud Loss Rate", f"{fraud_loss_rate:.2f}%", delta_color="inverse", help="Fraud that slipped through as a % of GMV")
 
 st.divider()
+
+# --- 6. CALCULATE ML FRONTIER ---
+def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
+    thresholds = np.linspace(5, 95, 40)
+    curve = []
+    
+    for t in thresholds:
+        sim_blocked = df_subset['risk_score'] >= t
+        
+        # 1. Prevented Fraud
+        tp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 1)
+        benefit = df_subset.loc[tp_mask, 'amount_eur'].sum() + (tp_mask.sum() * fee)
+        
+        # 2. False Positives
+        fp_mask = sim_blocked & (df_subset['is_actual_chargeback'] == 0)
+        fp_df = df_subset[fp_mask]
+        friction = (fp_df['amount_eur'].sum() * margin) + (len(fp_df[fp_df['switch_propensity'] == 0]) * ltv)
+        
+        # 3. Missed Fraud
+        missed_mask = (~sim_blocked) & (df_subset['is_actual_chargeback'] == 1)
+        missed_loss = df_subset.loc[missed_mask, 'amount_eur'].sum() + (missed_mask.sum() * fee)
+        
+        # NEW NFI Formula
+        nfi = benefit - friction - missed_loss
+        
+        curve.append({'Threshold': t, 'Benefit (€)': benefit, 'Friction (€)': friction, 'NFI': nfi})
+        
+    df_c = pd.DataFrame(curve)
+    opt_row = df_c.loc[df_c['NFI'].idxmax()]
+    
+    df_c['Friction_Diff'] = abs(df_c['Friction (€)'] - target_friction)
+    actual_eq_row = df_c.loc[df_c['Friction_Diff'].idxmin()]
+    
+    return df_c, opt_row, actual_eq_row['Threshold']
+
+df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
 
 # --- 6. CALCULATE ML FRONTIER ---
 def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
