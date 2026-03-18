@@ -143,27 +143,40 @@ curr_fraud_loss = fraud_missed['amount_eur'].sum() + (len(fraud_missed) * cb_fee
 
 actual_nfi = curr_benefit - curr_friction - curr_fraud_loss
 
-# --- 5. ACTUAL FINANCIAL IMPACT & RATES ---
-st.markdown("### 1. Actual Financial Impact (Current Rules State)")
-col1, col2, col3, col4 = st.columns(4)
+# --- 5. THE KPI & AGGREGATION LOGIC ---
+if market == 'All Markets':
+    sum_max_nfi = 0
+    # Calculate the Global Curve for the visual
+    df_curve, global_opt, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
+    
+    for m in df['global_entity_id'].unique():
+        m_df = df[df['global_entity_id'] == m]
+        m_fp = m_df[(m_df['rule_name'] != 'No_Rule') & (m_df['order_final_status'] == 'CANCELLED') & (m_df['is_actual_chargeback'] == 0)]
+        m_fric = (m_fp['amount_eur'].sum() * margin_pct) + (len(m_fp[m_fp['payment_switch'] == 0]) * ltv_cost)
+        _, m_opt, _ = calculate_frontier(m_df, margin_pct, cb_fee, ltv_cost, m_fric)
+        sum_max_nfi += m_opt['NFI']
+    
+    max_nfi_display = sum_max_nfi
+    optimal_threshold_display = "Market-Specific"
+    # This 'opt_point' is what the chart uses to draw the Star
+    opt_point = global_opt 
+else:
+    # Single market view
+    df_curve, opt_point, actual_eq_thresh = calculate_frontier(df, margin_pct, cb_fee, ltv_cost, curr_friction)
+    max_nfi_display = opt_point['NFI']
+    optimal_threshold_display = f"{opt_point['Threshold']:.1f}"
 
-col1.metric("Net Financial Impact", f"€{actual_nfi:,.0f}")
-col2.metric("Fraud Prevented (Benefit)", f"€{curr_benefit:,.0f}")
-col3.metric("Cost of False Positives", f"-€{curr_friction:,.0f}")
-col4.metric("Cost of Fraud (Missed)", f"-€{curr_fraud_loss:,.0f}")
+# --- 6. OPTIMAL VS ACTUAL BENCHMARK ROW ---
+st.markdown("### 2. Optimal vs. Actual Benchmark")
+b1, b2, b3, b4 = st.columns(4)
 
-col1_r, col2_r, col3_r, col4_r = st.columns(4)
-nfi_rate = (actual_nfi / total_gmv) * 100 if total_gmv > 0 else 0
-benefit_rate = (curr_benefit / total_gmv) * 100 if total_gmv > 0 else 0
-friction_rate = (curr_friction / total_gmv) * 100 if total_gmv > 0 else 0
-fraud_loss_rate = (curr_fraud_loss / total_gmv) * 100 if total_gmv > 0 else 0
+b1.metric("Total Processed GMV", f"€{total_gmv:,.0f}")
+exposure_delta = actual_fraud_exposure - (curr_benefit - (len(curr_tp) * cb_fee))
+b2.metric("Underlying Fraud Exposure", f"€{actual_fraud_exposure:,.0f}", f"-€{exposure_delta:,.0f} caught")
 
-col1_r.metric("NFI Rate (% of GMV)", f"{nfi_rate:.2f}%")
-col2_r.metric("Fraud Prevented Rate", f"{benefit_rate:.2f}%")
-col3_r.metric("False Positive Rate", f"{friction_rate:.2f}%", delta_color="inverse")
-col4_r.metric("Fraud Loss Rate", f"{fraud_loss_rate:.2f}%", delta_color="inverse")
-
-st.divider()
+nfi_delta = max_nfi_display - actual_nfi
+b3.metric("Max Net Financial Impact", f"€{max_nfi_display:,.0f}", f"{nfi_delta:+,.0f} vs Actual", delta_color="normal" if nfi_delta > 0 else "off")
+b4.metric("Optimal Risk Threshold", optimal_threshold_display, f"vs Actual eq. {actual_eq_thresh:.1f}")
 
 # --- 4. THE IMPROVED FRONTIER ENGINE ---
 def calculate_frontier(df_subset, margin, fee, ltv, target_friction):
